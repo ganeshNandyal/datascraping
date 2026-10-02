@@ -1,0 +1,114 @@
+Data Engineer Scraping Test – Technical Notes
+==============================================
+
+Author: [Your Name]
+Date: 2026-09-30
+Language: Python 3
+
+AI USAGE DISCLOSURE
+--------------------
+AI assisted with:
+  - Identifying that Glossier is a Shopify store and that /collections/.../products.json is available
+  - Drafting initial Playwright page-evaluation JS for Cellarbrations card extraction
+  - Writing this notes.txt outline
+
+Manually written / verified / modified by me:
+  - Scaffolding project structure, argparse CLI, and CSV writer boilerplate
+  - Confirmed live behaviour of Glossier products.json (pagination, fields, variants)
+  - Confirmed Cellarbrations returns Cloudflare 403 on plain HTTP from this environment
+  - Size-parsing regex and normalisation (measuring_unit / units)
+  - Decision to treat Shopify body_html as the product description (Task 3)
+  - All tradeoff reasoning below
+  - Final review of selectors and field mapping against the brief’s data types
+
+I can explain every line of the submitted code.
+
+
+EXERCISE 1 – GLOSSIER
+---------------------
+Target: https://www.glossier.com/collections/all
+
+Evidence / approach
+  - Site is Shopify Plus (BuiltWith / response headers / link preloads).
+  - Shopify exposes a public JSON endpoint:
+      GET /collections/all/products.json?limit=250&page=N
+  - Observed: page 1 returns 110 products; page 2 returns 0 → entire category fits in one request.
+  - Each product object already contains:
+      id, title, handle, body_html (description), images[], variants[] (id, title, price, featured_image)
+  - Therefore Tasks 1–3 are satisfied with a single HTTP client (requests) – no browser, no HTML parsing of the listing page.
+
+Key decisions
+  1. Prefer products.json over scraping HTML
+     - More stable, structured, and cheaper (one request vs many).
+     - Description is already present as body_html; no need to hit each product page for Task 3.
+  2. image column stored as a JSON array string (e.g. '["https://...","https://..."]') so the CSV remains flat while matching the brief’s “Array of strings” type.
+  3. scraped_at is ISO-8601 UTC at the start of the run (same timestamp for the whole batch).
+  4. Stretch Task 4 (--variants): emit one row per variant; product_id becomes the variant id (unique); name becomes “Product – Size/Shade”.
+  5. Stretch Task 5 (--in): set cookies localization=IN and cart_currency=INR for India. Prices remain numeric strings in the currency Shopify returns for that locale.
+
+Tradeoffs
+  - products.json is an unofficial but widely used Shopify convention; Shopify could restrict it. If that happens, fall back to the HTML collection page + product JSON by handle (/products/{handle}.json).
+  - body_html can contain marketing HTML; we strip tags for a plain-text description. Richer structured claims (ingredients etc.) would need a product-page parse.
+  - No rate limiting needed for ~110 products; for larger catalogues add a short sleep between pages.
+
+
+EXERCISE 2 – CELLARBRATIONS
+---------------------------
+Target: https://www.cellarbrations.com.au/sm/delivery/rsid/144981/categories/spirits/whisky-id-Whisky_Food
+
+Task 5 – Browser vs direct HTTP (Data Engineer requirement)
+  Evidence:
+    - curl / requests to the category URL return HTTP 403 with a Cloudflare “Sorry, you have been blocked” challenge page.
+    - Response headers include cf-ray, server: cloudflare, and a __cf_bm cookie – classic managed challenge / bot score block for datacenter IPs.
+    - Therefore plain HTTP requests cannot extract listing or product data from this environment without solving the challenge (which is not stable or allowed under typical ToS).
+
+  Chosen approach: Playwright (Chromium, headless)
+    - Least resource-intensive *reliable* method that actually works against the current protection.
+    - One browser instance, listing page + optional product-page navigations.
+    - No extra asset blocking is applied by default (images/fonts load); for production one could route only document/xhr and block images to reduce bandwidth.
+
+  Tradeoffs (requests vs browser instances vs asset loading)
+    - Direct HTTP: near-zero CPU/memory, but currently 0% success rate from this network.
+    - Browser: higher cost (browser process, JS execution, possible asset downloads) but succeeds.
+    - What would make me change approach:
+        * Site starts serving a public JSON/GraphQL API or a less aggressive WAF for the same data.
+        * Residential proxy + cookie refresh makes a pure-requests path reliable.
+        * Legal/ToS or robots.txt explicitly forbids automated browsers (then stop).
+        * Volume grows large enough that a managed scraping API or official partner feed becomes cheaper than running Playwright at scale.
+
+  Implementation notes
+    - Selectors are defensive (multiple class / data-testid patterns) because the site is a modern SPA-style storefront and class names can change.
+    - measuring_unit / units are parsed from product name or a size element with a regex (e.g. “700 mL” → units=700, measuring_unit=Ml) matching the brief example.
+    - --max-products is provided for safe testing so candidates do not hammer the site while developing.
+    - If Playwright is not installed the script exits with a clear install instruction; Glossier scraper remains usable independently.
+
+
+REPRODUCIBILITY
+---------------
+  python -m venv .venv
+  source .venv/bin/activate   # or Windows equivalent
+  pip install -r requirements.txt
+  # Only for Exercise 2:
+  # pip install playwright && playwright install chromium
+
+  # Exercise 1 (all tasks including stretches)
+  python scrapers/glossier_scraper.py --variants --in --output data/glossier_products.csv
+
+  # Exercise 2 (limit while testing)
+  python scrapers/cellarbrations_scraper.py --max-products 15 --output data/cellarbrations_whisky.csv
+
+
+ASSUMPTIONS
+-----------
+  - “Unique product id” for Glossier = Shopify product id (or variant id when --variants is used).
+  - Price is kept as the string returned by the site (e.g. "34.00"); no currency symbol normalisation beyond what Shopify already sends.
+  - Description for Glossier = stripped body_html from the collection JSON (sufficient and avoids N extra requests).
+  - For Cellarbrations, product cards that cannot be matched to a stable id still produce a row (product_id may be empty) rather than being dropped – data correctness over silent omission.
+
+
+TOOLS USED
+----------
+  - Python 3, requests, csv, argparse, re, datetime
+  - Playwright (Exercise 2 only)
+  - curl / manual browser inspection for endpoint discovery
+  - No paid scraping proxies or third-party scraping APIs
