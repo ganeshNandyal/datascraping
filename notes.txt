@@ -1,10 +1,5 @@
 Data Engineer Scraping Test – Technical Notes
 ==============================================
-
-Author: [Your Name]
-Date: 2026-09-30
-Language: Python 3
-
 AI USAGE DISCLOSURE
 --------------------
 AI assisted with:
